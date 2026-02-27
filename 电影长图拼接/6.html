@@ -1,0 +1,251 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <title>影视拼接大师 - 双向联动专业版</title>
+    <style>
+        :root { --accent: #00d1b2; --bg: #121212; --panel: #1a1a1a; }
+        body { margin: 0; display: flex; height: 100vh; font-family: sans-serif; background: var(--bg); color: #fff; overflow: hidden; }
+        
+        /* 左侧面板 */
+        #left-panel { width: 380px; background: var(--panel); border-right: 1px solid #333; display: flex; flex-direction: column; padding: 20px; box-sizing: border-box; }
+        video { width: 100%; border-radius: 4px; background: #000; margin-bottom: 10px; }
+        
+        /* 帧管理区块 */
+        #frame-manager { flex: 1; border: 1px solid #333; border-radius: 8px; background: #0a0a0a; margin: 15px 0; overflow-y: auto; padding: 10px; scroll-behavior: smooth; }
+        .frame-item { display: flex; align-items: center; gap: 10px; background: #222; padding: 8px; border-radius: 4px; margin-bottom: 8px; font-size: 12px; border: 2px solid transparent; transition: 0.2s; cursor: pointer; }
+        .frame-item.active { border-color: var(--accent); background: #333; box-shadow: 0 0 10px rgba(0, 209, 178, 0.2); }
+        .frame-item img { width: 80px; height: 45px; object-fit: cover; border-radius: 2px; pointer-events: none; }
+        .frame-item .info { flex: 1; pointer-events: none; }
+        .frame-item button { width: auto; padding: 4px 8px; background: #ff4757; color: white; border: none; border-radius: 4px; cursor: pointer; }
+
+        /* 右侧面板 */
+        #right-panel { flex: 1; position: relative; background: #080808; display: flex; flex-direction: column; }
+        #canvas-viewport { flex: 1; overflow: auto; display: flex; align-items: flex-start; justify-content: center; padding: 40px; }
+        
+        canvas { box-shadow: 0 0 50px rgba(0,0,0,0.8); cursor: crosshair; transition: transform 0.1s ease-out; }
+
+        #zoom-ctrl { position: absolute; bottom: 30px; right: 30px; background: rgba(0,0,0,0.8); padding: 12px 20px; border-radius: 30px; display: flex; align-items: center; gap: 15px; border: 1px solid #444; z-index: 100; backdrop-filter: blur(10px); }
+        .ctrl-card { background: #252525; padding: 12px; border-radius: 8px; margin-bottom: 15px; }
+        button.btn-capture { width: 100%; padding: 12px; background: var(--accent); color: #000; border: none; border-radius: 6px; cursor: pointer; font-weight: bold; }
+        label { font-size: 11px; color: #888; display: block; margin-bottom: 5px; }
+        input[type="range"] { width: 100%; accent-color: var(--accent); }
+    </style>
+</head>
+<body>
+
+<div id="left-panel">
+    <input type="file" id="v-file" accept="video/*">
+    <video id="v-player" controls style="margin-top:10px"></video>
+    <button class="btn-capture" id="cap-btn">捕捉当前帧 (Space)</button>
+    
+    <div id="frame-manager"></div>
+
+    <div class="ctrl-card">
+        <label>全局底部裁剪 (剔除UI栏)</label>
+        <input type="range" id="y-crop" min="0" max="400" value="60">
+        <label style="margin-top:10px;">模式</label>
+        <select id="mode" style="width:100%; background:#333; color:#fff; border:none; padding:8px; border-radius:4px;">
+            <option value="subtitle">字幕叠层模式</option>
+            <option value="stack">幻影叠加模式</option>
+        </select>
+    </div>
+    <button onclick="save()" style="background:#fff; color:#000; padding:10px; border-radius:6px; border:none; font-weight:bold; cursor:pointer;">导出高清长图</button>
+</div>
+
+<div id="right-panel">
+    <div id="canvas-viewport">
+        <canvas id="main-cvs"></canvas>
+    </div>
+    <div id="zoom-ctrl">
+        <label style="margin:0;">预览缩放</label>
+        <input type="range" id="zoom-range" min="10" max="100" value="50" style="width:120px;">
+        <span id="zoom-val" style="font-size:12px; width:40px;">50%</span>
+    </div>
+</div>
+
+<script>
+    const video = document.getElementById('v-player');
+    const canvas = document.getElementById('main-cvs');
+    const ctx = canvas.getContext('2d');
+    const frameManager = document.getElementById('frame-manager');
+    const zoomRange = document.getElementById('zoom-range');
+
+    let frames = [];
+    let step = { x: 0, y: 80 }; 
+    let isDrag = false;
+    let lastM = { x: 0, y: 0 };
+    let activeIndex = -1; // 统一联动索引
+
+    document.getElementById('v-file').onchange = (e) => {
+        if(e.target.files[0]) video.src = URL.createObjectURL(e.target.files[0]);
+    };
+
+    async function capture() {
+        if (video.readyState < 2) return;
+        const tmp = document.createElement('canvas');
+        tmp.width = video.videoWidth;
+        tmp.height = video.videoHeight;
+        tmp.getContext('2d').drawImage(video, 0, 0);
+        const bmp = await createImageBitmap(tmp);
+        const dataUrl = tmp.toDataURL('image/jpeg', 0.2);
+        frames.push({ bmp, thumb: dataUrl });
+        updateFrameManager();
+        render();
+    }
+
+    function updateFrameManager() {
+        if (frames.length === 0) {
+            frameManager.innerHTML = `<div style="color:#666; font-size:12px; text-align:center; padding-top:50px;">暂无捕获帧</div>`;
+            return;
+        }
+        frameManager.innerHTML = '';
+        frames.forEach((f, index) => {
+            const div = document.createElement('div');
+            div.className = `frame-item ${index === activeIndex ? 'active' : ''}`;
+            div.id = `f-item-${index}`;
+            div.innerHTML = `
+                <img src="${f.thumb}">
+                <div class="info">第 ${index + 1} 帧</div>
+                <button onclick="event.stopPropagation(); deleteFrame(${index})">删除</button>
+            `;
+            
+            div.onmouseenter = () => { activeIndex = index; syncUI(); };
+            div.onmouseleave = () => { activeIndex = -1; syncUI(); };
+            frameManager.appendChild(div);
+        });
+    }
+
+    function deleteFrame(index) {
+        frames.splice(index, 1);
+        activeIndex = -1;
+        updateFrameManager();
+        render();
+    }
+
+    // 同步刷新UI高亮状态
+    function syncUI() {
+        // 更新列表高亮
+        const items = document.querySelectorAll('.frame-item');
+        items.forEach((item, idx) => {
+            if(idx === activeIndex) {
+                item.classList.add('active');
+                if(!isDrag) item.scrollIntoView({ block: 'nearest', behavior: 'smooth' });
+            } else {
+                item.classList.remove('active');
+            }
+        });
+        render();
+    }
+
+    function render() {
+        if (frames.length === 0) { ctx.clearRect(0,0,canvas.width, canvas.height); return; }
+
+        const mode = document.getElementById('mode').value;
+        const globalCrop = parseInt(document.getElementById('y-crop').value);
+        const first = frames[0].bmp;
+        const subH = Math.abs(step.y);
+        const firstH = first.height - globalCrop;
+
+        canvas.width = first.width;
+        canvas.height = (mode === 'subtitle') ? (firstH + (frames.length - 1) * subH) : (first.height + (frames.length - 1) * subH);
+
+        frames.forEach((f, i) => {
+            const img = f.bmp;
+            const px = (mode === 'stack') ? i * step.x : 0;
+            const py = (mode === 'stack') ? i * step.y : (i === 0 ? 0 : firstH + (i - 1) * subH);
+            const drawH = (mode === 'subtitle' && i > 0) ? subH : (i === 0 ? firstH : img.height);
+            const srcY = (mode === 'subtitle' && i > 0) ? (img.height - globalCrop - subH) : 0;
+
+            ctx.save();
+            if (mode === 'stack' && i < frames.length - 1) {
+                ctx.beginPath(); ctx.rect(px, py, Math.abs(step.x) || img.width, subH); ctx.clip();
+            }
+
+            ctx.drawImage(img, 0, srcY, img.width, drawH, px, py, img.width, drawH);
+
+            // 高亮绘制
+            if (i === activeIndex) {
+                ctx.fillStyle = "rgba(0, 209, 178, 0.35)";
+                ctx.fillRect(px, py, img.width, drawH);
+                ctx.strokeStyle = "rgba(0, 209, 178, 0.8)";
+                ctx.lineWidth = 6;
+                ctx.strokeRect(px, py, img.width, drawH);
+            }
+            ctx.restore();
+        });
+        applyZoom();
+    }
+
+    function applyZoom() {
+        const scale = zoomRange.value / 100;
+        canvas.style.transform = `scale(${scale})`;
+        canvas.style.transformOrigin = 'top center';
+        document.getElementById('zoom-val').innerText = `${zoomRange.value}%`;
+    }
+
+    // --- 核心改进：预览区反向联动列表 ---
+    canvas.onmousemove = (e) => {
+        if (isDrag || frames.length === 0) return;
+
+        const rect = canvas.getBoundingClientRect();
+        const scale = zoomRange.value / 100;
+        // 计算鼠标在画布上的真实 Y 坐标 (处理了缩放和偏移)
+        const mouseY = (e.clientY - rect.top) / scale;
+        
+        const mode = document.getElementById('mode').value;
+        const globalCrop = parseInt(document.getElementById('y-crop').value);
+        const firstH = frames[0].bmp.height - globalCrop;
+        const subH = Math.abs(step.y);
+
+        let detectedIndex = -1;
+        if (mode === 'subtitle') {
+            if (mouseY < firstH) {
+                detectedIndex = 0;
+            } else {
+                detectedIndex = Math.floor((mouseY - firstH) / subH) + 1;
+            }
+        }
+        
+        if (detectedIndex >= 0 && detectedIndex < frames.length) {
+            if (activeIndex !== detectedIndex) {
+                activeIndex = detectedIndex;
+                syncUI();
+            }
+        } else if (activeIndex !== -1) {
+            activeIndex = -1;
+            syncUI();
+        }
+    };
+
+    canvas.onmouseleave = () => {
+        if(!isDrag) { activeIndex = -1; syncUI(); }
+    };
+
+    // 拖拽逻辑保持灵敏度
+    canvas.onmousedown = (e) => { isDrag = true; lastM = { x: e.clientX, y: e.clientY }; };
+    window.onmousemove = (e) => {
+        if (!isDrag || frames.length === 0) return;
+        const scale = zoomRange.value / 100;
+        step.x += (e.clientX - lastM.x) / scale;
+        step.y += (e.clientY - lastM.y) / scale;
+        lastM = { x: e.clientX, y: e.clientY };
+        requestAnimationFrame(render);
+    };
+    window.onmouseup = () => isDrag = false;
+
+    document.getElementById('cap-btn').onclick = capture;
+    window.onkeydown = (e) => { if(e.code === 'Space') { e.preventDefault(); capture(); } };
+    zoomRange.oninput = applyZoom;
+    document.getElementById('y-crop').oninput = render;
+    document.getElementById('mode').onchange = render;
+
+    function save() {
+        const a = document.createElement('a');
+        a.download = `cinema_stitch_pro.png`;
+        a.href = canvas.toDataURL('image/png', 1.0);
+        a.click();
+    }
+</script>
+</body>
+</html>
